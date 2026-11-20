@@ -54,7 +54,8 @@ int VgmBridge::open(const char* path) {
     if (rc) return rc;
     std::vector<PLR_DEV_INFO> devices;
     rc = mix_player_->GetPlayer()->GetSongDeviceInfo(devices);
-    if (rc) return -3000-rc;
+    // 0: header information; 1: live device information. Both are successful.
+    if (rc != 0 && rc != 1) return -3000-rc;
     for (size_t i=0; i<devices.size(); ++i) {
         const auto& d = devices[i];
         if (!d.devDecl || !d.devDecl->channelCount) continue;
