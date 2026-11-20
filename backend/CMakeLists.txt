@@ -30,7 +30,7 @@ target_link_libraries(vgm_engine
     PRIVATE
         vgm-player
         vgm-emu
-        vgm-util
+        vgm-utils
 )
 
 target_compile_definitions(vgm_engine PRIVATE VGM_ENGINE_EXPORTS)
