@@ -1,323 +1,120 @@
 #include "libvgm_bridge.h"
-
+#include "loader_helpers.h"
 #include "player/vgmplayer.hpp"
-#include "utils/DataLoader.h"
-
 #include <algorithm>
-#include <cstring>
-#include <stdexcept>
-
-namespace {
-
-constexpr UINT32 SAMPLE_RATE = 48000;
-constexpr UINT32 CHANNELS = 2;
-constexpr UINT32 BIT_DEPTH = 16;
-constexpr UINT32 BUFFER_SIZE = 4096;
-constexpr INT32 MASTER_VOLUME_1_0 = 65536;
-
-float int16_to_float(INT16 value)
-{
-    return static_cast<float>(value) / 32768.0f;
-}
-
-}
 
 VgmBridge::VgmBridge() = default;
-
-VgmBridge::~VgmBridge()
-{
+VgmBridge::~VgmBridge() {
     stop();
     renderers_.clear();
-
-    if (mix_loader_) {
-        FileLoader_Deinit(mix_loader_);
-        mix_loader_ = nullptr;
-    }
+    if (mix_player_) { mix_player_->UnloadFile(); mix_player_.reset(); }
+    if (mix_loader_) FileLoader_Deinit(mix_loader_);
 }
-
-std::unique_ptr<PlayerA> VgmBridge::create_player()
-{
-    auto player = std::make_unique<PlayerA>();
-    player->RegisterPlayerEngine(new VGMPlayer());
-    player->SetOutputSettings(SAMPLE_RATE, CHANNELS, BIT_DEPTH, BUFFER_SIZE);
-    return player;
+std::unique_ptr<PlayerA> VgmBridge::create_player() {
+    auto p = std::make_unique<PlayerA>();
+    p->RegisterPlayerEngine(new VGMPlayer());
+    p->SetOutputSettings(48000, 2, 16, 4096);
+    return p;
 }
-
-int VgmBridge::configure_player(PlayerA& player, const char* path, DATA_LOADER** loader)
-{
-    if (!path || !loader) return VGM_ERR_INVALID_ARGUMENT;
-
-    PlayerA::Config config = player.GetConfiguration();
-    config.masterVol = MASTER_VOLUME_1_0;
-    config.loopCount = 0;
-    config.fadeSmpls = 0;
-    config.endSilenceSmpls = 0;
-    player.SetConfiguration(config);
-
-    DATA_LOADER* new_loader = FileLoader_Init(path);
-
-    if (!new_loader) {
-        return VGM_ERR_FILE_NOT_FOUND;
-    }
-
-    UINT8 result = player.LoadFile(new_loader);
-
-    if (result & 0x80) {
-        FileLoader_Deinit(new_loader);
-        return VGM_ERR_UNSUPPORTED_FILE;
-    }
-
-    *loader = new_loader;
-    return VGM_OK;
+int VgmBridge::configure_player(PlayerA& p, const char* path, DATA_LOADER** loader) {
+    auto cfg = p.GetConfiguration();
+    cfg.masterVol = 65536;
+    cfg.loopCount = 0;
+    cfg.fadeSmpls = 0;
+    cfg.endSilenceSmpls = 0;
+    p.SetConfiguration(cfg);
+    return scope_load_file(p, path, loader);
 }
-
-int VgmBridge::apply_channel_isolation(PlayerA& player, UINT32 target_device, UINT32 target_channel)
-{
-    PlayerBase* base_player = player.GetPlayer();
-
-    if (!base_player) return VGM_ERR_INTERNAL;
-
+int VgmBridge::apply_channel_isolation(PlayerA& p, UINT32 target, UINT32 channel) {
+    auto* b = p.GetPlayer();
+    if (!b) return -6;
     std::vector<PLR_DEV_INFO> devices;
-    base_player->GetSongDeviceInfo(devices);
-
-    for (const auto& device : devices) {
-        PLR_MUTE_OPTS mute_opts;
-        base_player->GetDeviceMuting(device.id, mute_opts);
-
-        UINT32 channel_count = 0;
-
-        if (device.devDecl && device.devDecl->channelCount) {
-            channel_count = device.devDecl->channelCount(device.devCfg);
-        }
-
-        UINT32 mask = 0;
-
-        for (UINT32 channel = 0; channel < channel_count; ++channel) {
-            if (device.id == target_device && channel == target_channel) {
-                continue;
-            }
-
-            mask |= (1u << channel);
-        }
-
-        mute_opts.chnMute[0] = mask;
-        base_player->SetDeviceMuting(device.id, mute_opts);
+    b->GetSongDeviceInfo(devices);
+    for (const auto& d : devices) {
+        PLR_MUTE_OPTS m{};
+        b->GetDeviceMuting(d.id, m);
+        m.chnMute[0] = 0xFFFFFFFFu;
+        m.chnMute[1] = 0xFFFFFFFFu;
+        if (d.id == target && channel < 32) m.chnMute[0] &= ~(1u << channel);
+        b->SetDeviceMuting(d.id, m);
     }
-
-    return VGM_OK;
+    return 0;
 }
-
-int VgmBridge::open(const char* path)
-{
-    if (!path) return VGM_ERR_INVALID_ARGUMENT;
-
+int VgmBridge::open(const char* path) {
+    if (!path) return -1;
     stop();
     renderers_.clear();
     names_.clear();
-
+    if (mix_player_) { mix_player_->UnloadFile(); mix_player_.reset(); }
+    if (mix_loader_) { FileLoader_Deinit(mix_loader_); mix_loader_ = nullptr; }
     mix_player_ = create_player();
-
-    int result = configure_player(*mix_player_, path, &mix_loader_);
-    if (result != VGM_OK) return result;
-
-    PlayerBase* base_player = mix_player_->GetPlayer();
-
-    if (!base_player) return VGM_ERR_INTERNAL;
-
+    int rc = configure_player(*mix_player_, path, &mix_loader_);
+    if (rc) return rc;
+    auto* b = mix_player_->GetPlayer();
+    if (!b) return -6;
     std::vector<PLR_DEV_INFO> devices;
-    base_player->GetSongDeviceInfo(devices);
-
-    for (const auto& device : devices) {
-        UINT32 channel_count = 0;
-
-        if (device.devDecl && device.devDecl->channelCount) {
-            channel_count = device.devDecl->channelCount(device.devCfg);
-        }
-
-        const char** device_channel_names = nullptr;
-
-        if (device.devDecl && device.devDecl->channelNames) {
-            device_channel_names = device.devDecl->channelNames(device.devCfg);
-        }
-
-        std::string device_name = "Sound device";
-
-        if (device.devDecl && device.devDecl->name) {
-            const char* name = device.devDecl->name(device.devCfg);
-            if (name) device_name = name;
-        }
-
-        for (UINT32 local = 0; local < channel_count; ++local) {
-            std::string channel_name;
-
-            if (device_channel_names && device_channel_names[local]) {
-                channel_name = device_channel_names[local];
-            } else {
-                channel_name = device_name + " CH " + std::to_string(local + 1);
-            }
-
-            names_.push_back(channel_name);
-
-            auto renderer = std::make_unique<IsolatedRenderer>();
-            renderer->player = create_player();
-
-            result = configure_player(
-                *renderer->player,
-                path,
-                &renderer->loader
-            );
-
-            if (result != VGM_OK) return result;
-
-            renderer->device_id = device.id;
-            renderer->local_channel = local;
-
-            result = apply_channel_isolation(
-                *renderer->player,
-                device.id,
-                local
-            );
-
-            if (result != VGM_OK) return result;
-
-            renderers_.push_back(std::move(renderer));
+    b->GetSongDeviceInfo(devices);
+    for (const auto& d : devices) {
+        if (!d.devDecl || !d.devDecl->channelCount) continue;
+        auto count = d.devDecl->channelCount(d.devCfg);
+        const char** names = d.devDecl->channelNames ? d.devDecl->channelNames(d.devCfg) : nullptr;
+        const char* name = d.devDecl->name ? d.devDecl->name(d.devCfg) : nullptr;
+        for (UINT32 c = 0; c < count; ++c) {
+            names_.push_back(names && names[c] ? names[c] : std::string(name ? name : "Device") + " CH " + std::to_string(c+1));
+            auto r = std::make_unique<IsolatedRenderer>();
+            r->player = create_player();
+            rc = configure_player(*r->player, path, &r->loader);
+            if (rc) return rc;
+            r->device_id = d.id;
+            r->local_channel = c;
+            rc = apply_channel_isolation(*r->player, d.id, c);
+            if (rc) return rc;
+            renderers_.push_back(std::move(r));
         }
     }
-
     muted_.assign(names_.size(), false);
-    return VGM_OK;
+    return 0;
 }
-
-int VgmBridge::play()
-{
-    if (!mix_player_) return VGM_ERR_INTERNAL;
-
+int VgmBridge::play() {
+    if (!mix_player_) return -6;
     mix_player_->Start();
-
-    for (auto& renderer : renderers_) {
-        renderer->player->Start();
-    }
-
+    for (auto& r : renderers_) r->player->Start();
     playing_ = true;
-    return VGM_OK;
+    return 0;
 }
-
-int VgmBridge::pause()
-{
+int VgmBridge::pause() { playing_ = false; return 0; }
+int VgmBridge::stop() {
     playing_ = false;
-    return VGM_OK;
+    if (mix_player_) mix_player_->Stop();
+    for (auto& r : renderers_) r->player->Stop();
+    return 0;
 }
-
-int VgmBridge::stop()
-{
-    playing_ = false;
-
-    if (mix_player_) {
-        mix_player_->Stop();
-    }
-
-    for (auto& renderer : renderers_) {
-        renderer->player->Stop();
-    }
-
-    return VGM_OK;
+std::vector<std::string> VgmBridge::channel_names() const { return names_; }
+size_t VgmBridge::channel_count() const { return names_.size(); }
+int VgmBridge::render_mix(int frames, float* out) {
+    if (!mix_player_ || !out || frames <= 0) return -1;
+    std::fill(out, out + static_cast<size_t>(frames)*2, 0.0f);
+    if (!playing_) return 0;
+    std::vector<INT16> data(static_cast<size_t>(frames)*2);
+    auto bytes = mix_player_->Render(static_cast<UINT32>(frames)*4, data.data());
+    size_t n = std::min(data.size(), static_cast<size_t>(bytes)/2);
+    for (size_t i = 0; i < n; ++i) out[i] = data[i] / 32768.0f * volume_;
+    return 0;
 }
-
-std::vector<std::string> VgmBridge::channel_names() const
-{
-    return names_;
+int VgmBridge::render_channel(int channel, int frames, float* out) {
+    if (!out || frames <= 0) return -1;
+    if (channel < 0 || channel >= static_cast<int>(renderers_.size())) return -3;
+    std::fill(out, out + frames, 0.0f);
+    if (!playing_) return 0;
+    std::vector<INT16> data(static_cast<size_t>(frames)*2);
+    auto bytes = renderers_[channel]->player->Render(static_cast<UINT32>(frames)*4, data.data());
+    size_t n = std::min(static_cast<size_t>(frames), static_cast<size_t>(bytes)/4);
+    for (size_t i = 0; i < n; ++i) out[i] = (static_cast<float>(data[i*2]) + data[i*2+1]) / 65536.0f * volume_;
+    return 0;
 }
-
-size_t VgmBridge::channel_count() const
-{
-    return names_.size();
+int VgmBridge::set_channel_mute(int channel, bool muted) {
+    if (channel < 0 || channel >= static_cast<int>(muted_.size())) return -3;
+    muted_[channel] = muted;
+    return 0;
 }
-
-int VgmBridge::render_mix(int frame_count, float* out_samples)
-{
-    if (!mix_player_ || !out_samples || frame_count <= 0) {
-        return VGM_ERR_INVALID_ARGUMENT;
-    }
-
-    if (!playing_) {
-        std::fill(out_samples, out_samples + static_cast<size_t>(frame_count) * CHANNELS, 0.0f);
-        return VGM_OK;
-    }
-
-    std::vector<INT16> packed(static_cast<size_t>(frame_count) * CHANNELS);
-
-    UINT32 rendered = mix_player_->Render(
-        static_cast<UINT32>(frame_count) * CHANNELS * sizeof(INT16),
-        packed.data()
-    );
-
-    size_t available_frames = rendered / (CHANNELS * sizeof(INT16));
-
-    for (int frame = 0; frame < frame_count; ++frame) {
-        if (static_cast<size_t>(frame) >= available_frames) {
-            out_samples[frame * 2 + 0] = 0.0f;
-            out_samples[frame * 2 + 1] = 0.0f;
-            continue;
-        }
-
-        out_samples[frame * 2 + 0] = int16_to_float(packed[frame * 2 + 0]) * volume_;
-        out_samples[frame * 2 + 1] = int16_to_float(packed[frame * 2 + 1]) * volume_;
-    }
-
-    return VGM_OK;
-}
-
-int VgmBridge::render_channel(int channel_index, int frame_count, float* out_samples)
-{
-    if (!out_samples || frame_count <= 0) {
-        return VGM_ERR_INVALID_ARGUMENT;
-    }
-
-    if (channel_index < 0 || channel_index >= static_cast<int>(renderers_.size())) {
-        return VGM_ERR_INVALID_CHANNEL;
-    }
-
-    if (!playing_) {
-        std::fill(out_samples, out_samples + frame_count, 0.0f);
-        return VGM_OK;
-    }
-
-    auto& renderer = renderers_[static_cast<size_t>(channel_index)];
-    std::vector<INT16> packed(static_cast<size_t>(frame_count) * CHANNELS);
-
-    UINT32 rendered = renderer->player->Render(
-        static_cast<UINT32>(frame_count) * CHANNELS * sizeof(INT16),
-        packed.data()
-    );
-
-    size_t available_frames = rendered / (CHANNELS * sizeof(INT16));
-
-    for (int frame = 0; frame < frame_count; ++frame) {
-        if (static_cast<size_t>(frame) >= available_frames) {
-            out_samples[frame] = 0.0f;
-            continue;
-        }
-
-        float left = int16_to_float(packed[frame * 2 + 0]);
-        float right = int16_to_float(packed[frame * 2 + 1]);
-        out_samples[frame] = ((left + right) * 0.5f) * volume_;
-    }
-
-    return VGM_OK;
-}
-
-int VgmBridge::set_channel_mute(int channel_index, bool muted)
-{
-    if (channel_index < 0 || channel_index >= static_cast<int>(muted_.size())) {
-        return VGM_ERR_INVALID_CHANNEL;
-    }
-
-    muted_[static_cast<size_t>(channel_index)] = muted;
-    return VGM_OK;
-}
-
-int VgmBridge::set_volume(float volume)
-{
-    volume_ = std::clamp(volume, 0.0f, 2.0f);
-    return VGM_OK;
-}
+int VgmBridge::set_volume(float v) { volume_ = std::clamp(v, 0.0f, 2.0f); return 0; }
