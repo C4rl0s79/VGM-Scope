@@ -46,7 +46,7 @@ jobs:
 
       - name: Build executable
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name VGM-Scope --add-binary "backend\build\Release\vgm_engine.dll;." app/main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name VGM-Scope --collect-all sounddevice --add-binary "backend\build\Release\vgm_engine.dll;." app/main.py
 
       - name: Copy runtime DLLs
         run: |

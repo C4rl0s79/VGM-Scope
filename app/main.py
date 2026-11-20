@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (
     QFileDialog, QLabel, QSlider, QGridLayout, QSplitter, QListWidget, QMessageBox
 )
 
-from app.engine import MockVgmEngine
+from app.libvgm_engine import LibVgmEngine
 from app.playlist import load_playlist
 from app.scope_panel import ScopePanel
 from app.labels import LabelStore
@@ -21,7 +21,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("VGM Scope")
         self.resize(1280, 760)
 
-        self.engine = MockVgmEngine()
+        self.engine = LibVgmEngine()
         self.labels = LabelStore(Path("labels.json"))
         self.playlist: list[Path] = []
         self.current_index = -1
