@@ -1,6 +1,7 @@
 #ifndef LIBVGM_BRIDGE_H
 #define LIBVGM_BRIDGE_H
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -36,12 +37,12 @@ public:
 private:
     struct IsolatedRenderer;
 
-    bool create_player(void** player, void** loader);
-    int configure_player(void* player, const char* path);
-    int apply_global_mute(void* player, int target_device, int target_channel, bool isolate);
+    bool create_player(PlayerA** player, FileLoader** loader);
+    int configure_player(PlayerA* player, FileLoader* loader, const char* path);
+    int apply_channel_isolation(PlayerA* player, UINT32 target_device, UINT32 target_channel);
 
-    void* mix_player_ = nullptr;
-    void* mix_loader_ = nullptr;
+    PlayerA* mix_player_ = nullptr;
+    FileLoader* mix_loader_ = nullptr;
 
     std::vector<std::unique_ptr<IsolatedRenderer>> renderers_;
     std::vector<std::string> names_;

@@ -2,11 +2,11 @@
 
 #include "player/playera.hpp"
 #include "player/vgmplayer.hpp"
-#include "DataLoader.h"
+#include "utils/DataLoader.h"
+#include "utils/FileLoader.h"
 
 #include <algorithm>
 #include <cstring>
-#include <memory>
 #include <stdexcept>
 
 namespace {
@@ -35,25 +35,23 @@ VgmBridge::VgmBridge() = default;
 VgmBridge::~VgmBridge()
 {
     stop();
-
     renderers_.clear();
 
     if (mix_player_) {
-        delete static_cast<PlayerA*>(mix_player_);
+        delete mix_player_;
         mix_player_ = nullptr;
     }
 
     if (mix_loader_) {
-        FileLoader_Close(mix_loader_);
         FileLoader_Free(mix_loader_);
         mix_loader_ = nullptr;
     }
 }
 
-bool VgmBridge::create_player(void** player, void** loader)
+bool VgmBridge::create_player(PlayerA** player, FileLoader** loader)
 {
     auto* new_player = new PlayerA();
-    auto* new_loader = FileLoader_Create();
+    auto* new_loader = FileLoader_Init(nullptr);
 
     if (!new_player || !new_loader) {
         delete new_player;
@@ -69,55 +67,68 @@ bool VgmBridge::create_player(void** player, void** loader)
     return true;
 }
 
-int VgmBridge::configure_player(void* player, const char* path)
+int VgmBridge::configure_player(PlayerA* player, FileLoader* loader, const char* path)
 {
-    auto* plr = static_cast<PlayerA*>(player);
-    auto* loader = static_cast<FileLoader*>(mix_loader_);
-
-    if (!plr || !loader) return VGM_ERR_INTERNAL;
-
-    if (!FileLoader_LoadFile(loader, path)) {
-        return VGM_ERR_FILE_NOT_FOUND;
-    }
+    if (!player || !loader || !path) return VGM_ERR_INVALID_ARGUMENT;
 
     PlayerConfig cfg;
-    plr->GetConfiguration(&cfg);
+    player->GetConfiguration(&cfg);
     cfg.masterVol = 1.0f;
     cfg.loopCount = 0;
     cfg.fadeTime = 0.0;
-    plr->SetConfiguration(&cfg);
+    player->SetConfiguration(&cfg);
 
-    if (!plr->LoadFile(loader)) {
+    if (!player->LoadFile(loader)) {
         return VGM_ERR_UNSUPPORTED_FILE;
     }
 
     return VGM_OK;
 }
 
-int VgmBridge::apply_global_mute(void* player, int target_device, int target_channel, bool isolate)
+int VgmBridge::apply_channel_isolation(PlayerA* player, UINT32 target_device, UINT32 target_channel)
 {
-    auto* plr = static_cast<PlayerA*>(player);
+    if (!player) return VGM_ERR_INVALID_ARGUMENT;
+
     std::vector<PLR_DEV_INFO> devices;
-    plr->GetDeviceInfos(devices);
+    player->GetSongDeviceInfo(devices);
 
     for (const auto& device : devices) {
-        PLR_DEV_OPTS opts;
-        plr->GetDeviceOptions(device.id, &opts);
+        PLR_MUTE_OPTS mute_opts;
+        player->GetDeviceMuting(device.id, mute_opts);
 
-        if (!isolate) {
-            opts.muteOpts.chnMute[0] = 0x00000000;
-            opts.muteOpts.chnMute[1] = 0x00000000;
-        } else if (static_cast<int>(device.id) == target_device) {
-            UINT32 mask = 0xFFFFFFFFu;
-            mask &= ~(1u << target_channel);
-            opts.muteOpts.chnMute[0] = mask;
-            opts.muteOpts.chnMute[1] = 0xFFFFFFFFu;
+        if (device.id == target_device) {
+            UINT32 channel_count = 0;
+
+            if (device.devDecl && device.devDecl->channelCount) {
+                channel_count = device.devDecl->channelCount(device.devCfg);
+            }
+
+            UINT32 mask = 0;
+
+            for (UINT32 channel = 0; channel < channel_count; ++channel) {
+                if (channel != target_channel) {
+                    mask |= (1u << channel);
+                }
+            }
+
+            mute_opts.chnMute[0] = mask;
         } else {
-            opts.muteOpts.chnMute[0] = 0xFFFFFFFFu;
-            opts.muteOpts.chnMute[1] = 0xFFFFFFFFu;
+            UINT32 channel_count = 0;
+
+            if (device.devDecl && device.devDecl->channelCount) {
+                channel_count = device.devDecl->channelCount(device.devCfg);
+            }
+
+            UINT32 mask = 0;
+
+            for (UINT32 channel = 0; channel < channel_count; ++channel) {
+                mask |= (1u << channel);
+            }
+
+            mute_opts.chnMute[0] = mask;
         }
 
-        plr->SetDeviceOptions(device.id, &opts);
+        player->SetDeviceMuting(device.id, mute_opts);
     }
 
     return VGM_OK;
@@ -135,14 +146,11 @@ int VgmBridge::open(const char* path)
         return VGM_ERR_INTERNAL;
     }
 
-    int result = configure_player(mix_player_, path);
+    int result = configure_player(mix_player_, mix_loader_, path);
     if (result != VGM_OK) return result;
 
-    auto* mix = static_cast<PlayerA*>(mix_player_);
     std::vector<PLR_DEV_INFO> devices;
-    mix->GetDeviceInfos(devices);
-
-    UINT32 global_channel = 0;
+    mix_player_->GetSongDeviceInfo(devices);
 
     for (const auto& device : devices) {
         UINT32 channel_count = 0;
@@ -177,44 +185,30 @@ int VgmBridge::open(const char* path)
 
             auto renderer = std::make_unique<IsolatedRenderer>();
 
-            void* new_player = nullptr;
-            void* new_loader = nullptr;
+            PlayerA* new_player = nullptr;
+            FileLoader* new_loader = nullptr;
 
             if (!create_player(&new_player, &new_loader)) {
                 return VGM_ERR_INTERNAL;
             }
 
-            renderer->player = *static_cast<PlayerA*>(new_player);
-            renderer->loader = static_cast<FileLoader*>(new_loader);
+            renderer->player = std::move(*new_player);
+            renderer->loader = new_loader;
             renderer->device_id = device.id;
             renderer->local_channel = local;
 
-            delete static_cast<PlayerA*>(new_player);
+            delete new_player;
 
-            if (!FileLoader_LoadFile(renderer->loader, path)) {
-                return VGM_ERR_FILE_NOT_FOUND;
-            }
+            result = configure_player(&renderer->player, renderer->loader, path);
+            if (result != VGM_OK) return result;
 
-            PlayerConfig cfg;
-            renderer->player.GetConfiguration(&cfg);
-            cfg.masterVol = 1.0f;
-            cfg.loopCount = 0;
-            cfg.fadeTime = 0.0;
-            renderer->player.SetConfiguration(&cfg);
-
-            if (!renderer->player.LoadFile(renderer->loader)) {
-                return VGM_ERR_UNSUPPORTED_FILE;
-            }
-
-            apply_global_mute(
+            apply_channel_isolation(
                 &renderer->player,
-                static_cast<int>(device.id),
-                static_cast<int>(local),
-                true
+                device.id,
+                local
             );
 
             renderers_.push_back(std::move(renderer));
-            ++global_channel;
         }
     }
 
@@ -226,8 +220,7 @@ int VgmBridge::play()
 {
     if (!mix_player_) return VGM_ERR_INTERNAL;
 
-    auto* mix = static_cast<PlayerA*>(mix_player_);
-    mix->Start();
+    mix_player_->Start();
 
     for (auto& renderer : renderers_) {
         renderer->player.Start();
@@ -248,7 +241,7 @@ int VgmBridge::stop()
     playing_ = false;
 
     if (mix_player_) {
-        static_cast<PlayerA*>(mix_player_)->Stop();
+        mix_player_->Stop();
     }
 
     for (auto& renderer : renderers_) {
@@ -280,9 +273,8 @@ int VgmBridge::render_mix(int frame_count, float* out_samples)
     }
 
     std::vector<INT16> packed(static_cast<size_t>(frame_count) * CHANNELS);
-    auto* mix = static_cast<PlayerA*>(mix_player_);
 
-    UINT32 rendered = mix->Render(
+    UINT32 rendered = mix_player_->Render(
         static_cast<UINT32>(frame_count) * CHANNELS * sizeof(INT16),
         packed.data()
     );
@@ -349,16 +341,6 @@ int VgmBridge::set_channel_mute(int channel_index, bool muted)
     }
 
     muted_[static_cast<size_t>(channel_index)] = muted;
-
-    if (!mix_player_) return VGM_ERR_INTERNAL;
-
-    auto* mix = static_cast<PlayerA*>(mix_player_);
-    std::vector<PLR_DEV_INFO> devices;
-    mix->GetDeviceInfos(devices);
-
-    // MVP: mute jest stosowane do izolowanych rendererów przez GUI.
-    // Główny miks pozostaje niezmieniony, aby nie zaburzać synchronizacji.
-
     return VGM_OK;
 }
 

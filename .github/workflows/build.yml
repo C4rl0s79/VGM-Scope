@@ -23,9 +23,22 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
+      - name: Install x64 dependencies
+        run: |
+          vcpkg install zlib:x64-windows libiconv:x64-windows
+
       - name: Configure backend
         run: |
-          cmake -S backend -B backend\build
+          cmake -S backend -B backend\build `
+            -DCMAKE_TOOLCHAIN_FILE=C:\vcpkg\scripts\buildsystems\vcpkg.cmake `
+            -DVCPKG_TARGET_TRIPLET=x64-windows `
+            -DZLIB_ROOT=C:\vcpkg\installed\x64-windows `
+            -DIconv_INCLUDE_DIR=C:\vcpkg\installed\x64-windows\include `
+            -DIconv_LIBRARY=C:\vcpkg\installed\x64-windows\lib\libiconv.lib `
+            -DBUILD_PLAYER=OFF `
+            -DBUILD_VGM2WAV=OFF `
+            -DBUILD_TESTS=OFF `
+            -DUSE_SANITIZERS=OFF
 
       - name: Build backend
         run: |

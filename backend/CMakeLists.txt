@@ -31,6 +31,8 @@ target_link_libraries(vgm_engine
         vgm-player
         vgm-emu
         vgm-util
+        ZLIB::ZLIB
+        Iconv::Iconv
 )
 
 target_compile_definitions(vgm_engine PRIVATE VGM_ENGINE_EXPORTS)
