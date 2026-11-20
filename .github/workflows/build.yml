@@ -48,9 +48,15 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name VGM-Scope --add-binary "backend\build\Release\vgm_engine.dll;." app/main.py
 
+      - name: Copy runtime DLLs
+        run: |
+          if (Test-Path "C:\vcpkg\installed\x64-windows\bin") {
+            Copy-Item -Path "C:\vcpkg\installed\x64-windows\bin\*.dll" -Destination "dist" -Force
+          }
+
       - name: Create ZIP
         run: |
-          Compress-Archive -Path dist/VGM-Scope.exe -DestinationPath VGM-Scope-windows-x64.zip
+          Compress-Archive -Path dist/* -DestinationPath VGM-Scope-windows-x64.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
