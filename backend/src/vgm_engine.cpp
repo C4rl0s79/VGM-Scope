@@ -69,20 +69,22 @@ VGM_API int vgm_is_playing(VgmHandle handle) {
 VGM_API int vgm_get_channel_count(VgmHandle handle) {
     auto* state = as_engine(handle);
     if (!state) return VGM_ERR_INVALID_HANDLE;
-    return static_cast<int>(state->channel_names.size());
+    return static_cast<int>(state->bridge->channel_count());
 }
 
 VGM_API int vgm_get_channel_name(VgmHandle handle, int channel_index, char* out_buffer, int buffer_size) {
     auto* state = as_engine(handle);
     if (!state) return VGM_ERR_INVALID_HANDLE;
 
-    if (channel_index < 0 || channel_index >= static_cast<int>(state->channel_names.size()))
+    auto names = state->bridge->channel_names();
+
+    if (channel_index < 0 || channel_index >= static_cast<int>(names.size()))
         return VGM_ERR_INVALID_CHANNEL;
 
     if (!out_buffer || buffer_size <= 0)
         return VGM_ERR_INVALID_ARGUMENT;
 
-    const std::string& name = state->channel_names[static_cast<size_t>(channel_index)];
+    const std::string& name = names[static_cast<size_t>(channel_index)];
     size_t length = std::min(name.size(), static_cast<size_t>(buffer_size - 1));
 
     std::memcpy(out_buffer, name.c_str(), length);
@@ -91,14 +93,16 @@ VGM_API int vgm_get_channel_name(VgmHandle handle, int channel_index, char* out_
     return VGM_OK;
 }
 
-VGM_API int vgm_get_channel_samples(VgmHandle handle, int channel_index, float* out_samples, int sample_count) {
+VGM_API int vgm_get_mix_samples(VgmHandle handle, float* out_samples, int frame_count) {
     auto* state = as_engine(handle);
     if (!state) return VGM_ERR_INVALID_HANDLE;
+    return state->bridge->render_mix(frame_count, out_samples);
+}
 
-    if (!out_samples || sample_count <= 0)
-        return VGM_ERR_INVALID_ARGUMENT;
-
-    return state->bridge->get_channel_samples(channel_index, out_samples, sample_count);
+VGM_API int vgm_get_channel_samples(VgmHandle handle, int channel_index, float* out_samples, int frame_count) {
+    auto* state = as_engine(handle);
+    if (!state) return VGM_ERR_INVALID_HANDLE;
+    return state->bridge->render_channel(channel_index, frame_count, out_samples);
 }
 
 VGM_API int vgm_set_channel_mute(VgmHandle handle, int channel_index, int muted) {
@@ -110,7 +114,6 @@ VGM_API int vgm_set_channel_mute(VgmHandle handle, int channel_index, int muted)
 VGM_API int vgm_set_volume(VgmHandle handle, float volume) {
     auto* state = as_engine(handle);
     if (!state) return VGM_ERR_INVALID_HANDLE;
-    state->volume = volume;
     return state->bridge->set_volume(volume);
 }
 

@@ -26,6 +26,11 @@ target_include_directories(vgm_engine
         ${libvgm_SOURCE_DIR}
 )
 
-target_link_libraries(vgm_engine PRIVATE libvgm)
+target_link_libraries(vgm_engine
+    PRIVATE
+        vgm-player
+        vgm-emu
+        vgm-util
+)
 
 target_compile_definitions(vgm_engine PRIVATE VGM_ENGINE_EXPORTS)

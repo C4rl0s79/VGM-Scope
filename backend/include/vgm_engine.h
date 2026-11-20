@@ -28,7 +28,9 @@ VGM_API int vgm_is_playing(VgmHandle handle);
 VGM_API int vgm_get_channel_count(VgmHandle handle);
 VGM_API int vgm_get_channel_name(VgmHandle handle, int channel_index, char* out_buffer, int buffer_size);
 
-VGM_API int vgm_get_channel_samples(VgmHandle handle, int channel_index, float* out_samples, int sample_count);
+VGM_API int vgm_get_mix_samples(VgmHandle handle, float* out_samples, int frame_count);
+VGM_API int vgm_get_channel_samples(VgmHandle handle, int channel_index, float* out_samples, int frame_count);
+
 VGM_API int vgm_set_channel_mute(VgmHandle handle, int channel_index, int muted);
 VGM_API int vgm_set_volume(VgmHandle handle, float volume);
 

@@ -16,7 +16,7 @@ enum {
 
 class VgmBridge {
 public:
-    VgmBridge() = default;
+    VgmBridge();
     ~VgmBridge();
 
     int open(const char* path);
@@ -25,14 +25,29 @@ public:
     int stop();
 
     std::vector<std::string> channel_names() const;
+    size_t channel_count() const;
 
-    int get_channel_samples(int channel_index, float* out_samples, int sample_count);
+    int render_mix(int frame_count, float* out_samples);
+    int render_channel(int channel_index, int frame_count, float* out_samples);
+
     int set_channel_mute(int channel_index, bool muted);
     int set_volume(float volume);
 
 private:
-    void* player_ = nullptr;
+    struct IsolatedRenderer;
+
+    bool create_player(void** player, void** loader);
+    int configure_player(void* player, const char* path);
+    int apply_global_mute(void* player, int target_device, int target_channel, bool isolate);
+
+    void* mix_player_ = nullptr;
+    void* mix_loader_ = nullptr;
+
+    std::vector<std::unique_ptr<IsolatedRenderer>> renderers_;
     std::vector<std::string> names_;
+    std::vector<bool> muted_;
+    float volume_ = 1.0f;
+    bool playing_ = false;
 };
 
 #endif
