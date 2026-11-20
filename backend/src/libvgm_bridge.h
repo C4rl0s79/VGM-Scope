@@ -20,6 +20,21 @@ enum {
 
 class VgmBridge {
 public:
+    struct IsolatedRenderer {
+        std::unique_ptr<PlayerA> player;
+        DATA_LOADER* loader = nullptr;
+        UINT32 device_id = 0;
+        UINT32 local_channel = 0;
+
+        ~IsolatedRenderer()
+        {
+            if (loader) {
+                FileLoader_Deinit(loader);
+                loader = nullptr;
+            }
+        }
+    };
+
     VgmBridge();
     ~VgmBridge();
 
@@ -38,8 +53,6 @@ public:
     int set_volume(float volume);
 
 private:
-    struct IsolatedRenderer;
-
     std::unique_ptr<PlayerA> create_player();
     int configure_player(PlayerA& player, const char* path, DATA_LOADER** loader);
     int apply_channel_isolation(PlayerA& player, UINT32 target_device, UINT32 target_channel);

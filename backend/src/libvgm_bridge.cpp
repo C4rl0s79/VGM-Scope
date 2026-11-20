@@ -15,13 +15,6 @@ constexpr UINT32 BIT_DEPTH = 16;
 constexpr UINT32 BUFFER_SIZE = 4096;
 constexpr INT32 MASTER_VOLUME_1_0 = 65536;
 
-struct IsolatedRenderer {
-    std::unique_ptr<PlayerA> player;
-    DATA_LOADER* loader = nullptr;
-    UINT32 device_id = 0;
-    UINT32 local_channel = 0;
-};
-
 float int16_to_float(INT16 value)
 {
     return static_cast<float>(value) / 32768.0f;
@@ -141,7 +134,7 @@ int VgmBridge::open(const char* path)
             channel_count = device.devDecl->channelCount(device.devCfg);
         }
 
-        const char* const* device_channel_names = nullptr;
+        const char** device_channel_names = nullptr;
 
         if (device.devDecl && device.devDecl->channelNames) {
             device_channel_names = device.devDecl->channelNames(device.devCfg);
