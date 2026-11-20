@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+#include "player/playera.hpp"
+#include "utils/FileLoader.h"
+
 enum {
     VGM_OK = 0,
     VGM_ERR_INVALID_ARGUMENT = -1,
@@ -37,12 +40,12 @@ public:
 private:
     struct IsolatedRenderer;
 
-    bool create_player(PlayerA** player, FileLoader** loader);
-    int configure_player(PlayerA* player, FileLoader* loader, const char* path);
-    int apply_channel_isolation(PlayerA* player, UINT32 target_device, UINT32 target_channel);
+    std::unique_ptr<PlayerA> create_player();
+    int configure_player(PlayerA& player, const char* path, DATA_LOADER** loader);
+    int apply_channel_isolation(PlayerA& player, UINT32 target_device, UINT32 target_channel);
 
-    PlayerA* mix_player_ = nullptr;
-    FileLoader* mix_loader_ = nullptr;
+    std::unique_ptr<PlayerA> mix_player_;
+    DATA_LOADER* mix_loader_ = nullptr;
 
     std::vector<std::unique_ptr<IsolatedRenderer>> renderers_;
     std::vector<std::string> names_;

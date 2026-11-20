@@ -1,9 +1,7 @@
 #include "libvgm_bridge.h"
 
-#include "player/playera.hpp"
 #include "player/vgmplayer.hpp"
 #include "utils/DataLoader.h"
-#include "utils/FileLoader.h"
 
 #include <algorithm>
 #include <cstring>
@@ -15,10 +13,11 @@ constexpr UINT32 SAMPLE_RATE = 48000;
 constexpr UINT32 CHANNELS = 2;
 constexpr UINT32 BIT_DEPTH = 16;
 constexpr UINT32 BUFFER_SIZE = 4096;
+constexpr INT32 MASTER_VOLUME_1_0 = 65536;
 
 struct IsolatedRenderer {
-    PlayerA player;
-    FileLoader* loader = nullptr;
+    std::unique_ptr<PlayerA> player;
+    DATA_LOADER* loader = nullptr;
     UINT32 device_id = 0;
     UINT32 local_channel = 0;
 };
@@ -37,98 +36,79 @@ VgmBridge::~VgmBridge()
     stop();
     renderers_.clear();
 
-    if (mix_player_) {
-        delete mix_player_;
-        mix_player_ = nullptr;
-    }
-
     if (mix_loader_) {
-        FileLoader_Free(mix_loader_);
+        FileLoader_Deinit(mix_loader_);
         mix_loader_ = nullptr;
     }
 }
 
-bool VgmBridge::create_player(PlayerA** player, FileLoader** loader)
+std::unique_ptr<PlayerA> VgmBridge::create_player()
 {
-    auto* new_player = new PlayerA();
-    auto* new_loader = FileLoader_Init(nullptr);
-
-    if (!new_player || !new_loader) {
-        delete new_player;
-        if (new_loader) FileLoader_Free(new_loader);
-        return false;
-    }
-
-    new_player->RegisterPlayerEngine(new VGMPlayer());
-    new_player->SetOutputSettings(SAMPLE_RATE, CHANNELS, BIT_DEPTH, BUFFER_SIZE);
-
-    *player = new_player;
-    *loader = new_loader;
-    return true;
+    auto player = std::make_unique<PlayerA>();
+    player->RegisterPlayerEngine(new VGMPlayer());
+    player->SetOutputSettings(SAMPLE_RATE, CHANNELS, BIT_DEPTH, BUFFER_SIZE);
+    return player;
 }
 
-int VgmBridge::configure_player(PlayerA* player, FileLoader* loader, const char* path)
+int VgmBridge::configure_player(PlayerA& player, const char* path, DATA_LOADER** loader)
 {
-    if (!player || !loader || !path) return VGM_ERR_INVALID_ARGUMENT;
+    if (!path || !loader) return VGM_ERR_INVALID_ARGUMENT;
 
-    PlayerConfig cfg;
-    player->GetConfiguration(&cfg);
-    cfg.masterVol = 1.0f;
-    cfg.loopCount = 0;
-    cfg.fadeTime = 0.0;
-    player->SetConfiguration(&cfg);
+    PlayerA::Config config = player.GetConfiguration();
+    config.masterVol = MASTER_VOLUME_1_0;
+    config.loopCount = 0;
+    config.fadeSmpls = 0;
+    config.endSilenceSmpls = 0;
+    player.SetConfiguration(config);
 
-    if (!player->LoadFile(loader)) {
+    DATA_LOADER* new_loader = FileLoader_Init(path);
+
+    if (!new_loader) {
+        return VGM_ERR_FILE_NOT_FOUND;
+    }
+
+    UINT8 result = player.LoadFile(new_loader);
+
+    if (result & 0x80) {
+        FileLoader_Deinit(new_loader);
         return VGM_ERR_UNSUPPORTED_FILE;
     }
 
+    *loader = new_loader;
     return VGM_OK;
 }
 
-int VgmBridge::apply_channel_isolation(PlayerA* player, UINT32 target_device, UINT32 target_channel)
+int VgmBridge::apply_channel_isolation(PlayerA& player, UINT32 target_device, UINT32 target_channel)
 {
-    if (!player) return VGM_ERR_INVALID_ARGUMENT;
+    PlayerBase* base_player = player.GetPlayer();
+
+    if (!base_player) return VGM_ERR_INTERNAL;
 
     std::vector<PLR_DEV_INFO> devices;
-    player->GetSongDeviceInfo(devices);
+    base_player->GetSongDeviceInfo(devices);
 
     for (const auto& device : devices) {
         PLR_MUTE_OPTS mute_opts;
-        player->GetDeviceMuting(device.id, mute_opts);
+        base_player->GetDeviceMuting(device.id, mute_opts);
 
-        if (device.id == target_device) {
-            UINT32 channel_count = 0;
+        UINT32 channel_count = 0;
 
-            if (device.devDecl && device.devDecl->channelCount) {
-                channel_count = device.devDecl->channelCount(device.devCfg);
-            }
-
-            UINT32 mask = 0;
-
-            for (UINT32 channel = 0; channel < channel_count; ++channel) {
-                if (channel != target_channel) {
-                    mask |= (1u << channel);
-                }
-            }
-
-            mute_opts.chnMute[0] = mask;
-        } else {
-            UINT32 channel_count = 0;
-
-            if (device.devDecl && device.devDecl->channelCount) {
-                channel_count = device.devDecl->channelCount(device.devCfg);
-            }
-
-            UINT32 mask = 0;
-
-            for (UINT32 channel = 0; channel < channel_count; ++channel) {
-                mask |= (1u << channel);
-            }
-
-            mute_opts.chnMute[0] = mask;
+        if (device.devDecl && device.devDecl->channelCount) {
+            channel_count = device.devDecl->channelCount(device.devCfg);
         }
 
-        player->SetDeviceMuting(device.id, mute_opts);
+        UINT32 mask = 0;
+
+        for (UINT32 channel = 0; channel < channel_count; ++channel) {
+            if (device.id == target_device && channel == target_channel) {
+                continue;
+            }
+
+            mask |= (1u << channel);
+        }
+
+        mute_opts.chnMute[0] = mask;
+        base_player->SetDeviceMuting(device.id, mute_opts);
     }
 
     return VGM_OK;
@@ -142,15 +122,17 @@ int VgmBridge::open(const char* path)
     renderers_.clear();
     names_.clear();
 
-    if (!create_player(&mix_player_, &mix_loader_)) {
-        return VGM_ERR_INTERNAL;
-    }
+    mix_player_ = create_player();
 
-    int result = configure_player(mix_player_, mix_loader_, path);
+    int result = configure_player(*mix_player_, path, &mix_loader_);
     if (result != VGM_OK) return result;
 
+    PlayerBase* base_player = mix_player_->GetPlayer();
+
+    if (!base_player) return VGM_ERR_INTERNAL;
+
     std::vector<PLR_DEV_INFO> devices;
-    mix_player_->GetSongDeviceInfo(devices);
+    base_player->GetSongDeviceInfo(devices);
 
     for (const auto& device : devices) {
         UINT32 channel_count = 0;
@@ -184,29 +166,26 @@ int VgmBridge::open(const char* path)
             names_.push_back(channel_name);
 
             auto renderer = std::make_unique<IsolatedRenderer>();
+            renderer->player = create_player();
 
-            PlayerA* new_player = nullptr;
-            FileLoader* new_loader = nullptr;
+            result = configure_player(
+                *renderer->player,
+                path,
+                &renderer->loader
+            );
 
-            if (!create_player(&new_player, &new_loader)) {
-                return VGM_ERR_INTERNAL;
-            }
+            if (result != VGM_OK) return result;
 
-            renderer->player = std::move(*new_player);
-            renderer->loader = new_loader;
             renderer->device_id = device.id;
             renderer->local_channel = local;
 
-            delete new_player;
-
-            result = configure_player(&renderer->player, renderer->loader, path);
-            if (result != VGM_OK) return result;
-
-            apply_channel_isolation(
-                &renderer->player,
+            result = apply_channel_isolation(
+                *renderer->player,
                 device.id,
                 local
             );
+
+            if (result != VGM_OK) return result;
 
             renderers_.push_back(std::move(renderer));
         }
@@ -223,7 +202,7 @@ int VgmBridge::play()
     mix_player_->Start();
 
     for (auto& renderer : renderers_) {
-        renderer->player.Start();
+        renderer->player->Start();
     }
 
     playing_ = true;
@@ -245,7 +224,7 @@ int VgmBridge::stop()
     }
 
     for (auto& renderer : renderers_) {
-        renderer->player.Stop();
+        renderer->player->Stop();
     }
 
     return VGM_OK;
@@ -313,7 +292,7 @@ int VgmBridge::render_channel(int channel_index, int frame_count, float* out_sam
     auto& renderer = renderers_[static_cast<size_t>(channel_index)];
     std::vector<INT16> packed(static_cast<size_t>(frame_count) * CHANNELS);
 
-    UINT32 rendered = renderer->player.Render(
+    UINT32 rendered = renderer->player->Render(
         static_cast<UINT32>(frame_count) * CHANNELS * sizeof(INT16),
         packed.data()
     );
